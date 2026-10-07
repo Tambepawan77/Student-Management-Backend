@@ -1,15 +1,19 @@
 from fastapi import FastAPI, HTTPException
 import psycopg2
 from pydantic import BaseModel
+from dotenv import load_dotenv
+import os
+
+load_dotenv()
 
 app = FastAPI()
 
 connection = psycopg2.connect(
-    host = 'localhost',
-    port = '5432',
-    database = 'postgres',
-    user = 'postgres',
-    password = 'Pawan@2004'
+    host = os.getenv('DB_HOST'),
+    port = os.getenv('DB_PORT'),
+    database = os.getenv('DB_DATABASE'),
+    user = os.getenv('DB_USER'),
+    password = os.getenv('DB_PASS')
 )
 
 cursor = connection.cursor()
