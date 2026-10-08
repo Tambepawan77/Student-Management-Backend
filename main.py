@@ -1,10 +1,10 @@
-from fastapi import FastAPI, HTTPException
-import psycopg2
+from fastapi import FastAPI, HTTPException, status
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import psycopg2
+from psycopg2.extras import RealDictCursor
 import os
-from fastapi.middleware.cors import CORSMiddleware
-
 
 load_dotenv()
 
@@ -12,97 +12,108 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],     # Use ["*"] to allow all origins (not recommended with credentials)
-    allow_credentials=False,    # Allow cookies or authorization headers
-    allow_methods=["*"],       # Allow all HTTP methods (GET, POST, PUT, DELETE, etc.)
-    allow_headers=["*"],       # Allow all request headers
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-# connection = psycopg2.connect(
-#     host = os.getenv('DB_HOST'),
-#     port = os.getenv('DB_PORT'),
-#     database = os.getenv('DB_DATABASE'),
-#     user = os.getenv('DB_USER'),
-#     password = os.getenv('DB_PASS')
-# )
+# Use Render environment variable with fallback
+DATABASE_URL = os.getenv(
+    "DATABASE_URL",
+    "postgresql://neondb_owner:npg_oDjqHzS7X5by@ep-lively-dream-b39oep82-pooler.c-4.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+)
 
-connection = psycopg2.connect('postgresql://neondb_owner:npg_oDjqHzS7X5by@ep-lively-dream-b39oep82-pooler.c-4.ap-southeast-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require')
-
-cursor = connection.cursor()
+# Connect to PostgreSQL
+connection = psycopg2.connect(DATABASE_URL)
+connection.autocommit = True  # Avoids manual commit/rollback management
 
 class Student(BaseModel):
-    id: int = None
-    name: str = None
-    course: str = None
+    id: int
+    name: str
+    course: str
 
-# Get All Students
+
+# 1. Get All Students
 @app.get('/students')
 def get_all_students():
-    cursor.execute('SELECT * FROM students')
-    rows = cursor.fetchall()
-    result = []
-    for row in rows:
-        result.append({
-            'id': row[0],
-            'name': row[1],
-            'course': row[2]
-        })
-    return result
+    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute('SELECT id, name, course FROM students ORDER BY id ASC')
+        return cursor.fetchall()
 
-# Get Single Student by ID
+
+# 2. Get Single Student by ID
 @app.get('/students/{id}')
 def get_single_student(id: int):
-    try:
-        cursor.execute('SELECT * FROM students WHERE id=%s', (id,))
-        row = cursor.fetchone()
-        return {
-            'id': row[0],
-            'name': row[1],
-            'course': row[2]
-        }
-    except:
-        raise HTTPException(status_code=404, detail='Invalid Student ID')
-        
-# Create Student Record
-@app.post('/students')
+    with connection.cursor(cursor_factory=RealDictCursor) as cursor:
+        cursor.execute('SELECT id, name, course FROM students WHERE id=%s', (id,))
+        student = cursor.fetchone()
+        if not student:
+            raise HTTPException(status_code=404, detail='Student not found')
+        return student
+
+
+# 3. Create Student Record
+@app.post('/students', status_code=status.HTTP_201_CREATED)
 def create_student_record(student: Student):
     try:
-        cursor.execute('INSERT INTO students VALUES (%s, %s, %s)', (student.id, student.name, student.course))
-        connection.commit()
-        raise HTTPException(status_code=201, detail='Student Record Created Successfully')
+        with connection.cursor() as cursor:
+            cursor.execute(
+                'INSERT INTO students (id, name, course) VALUES (%s, %s, %s)',
+                (student.id, student.name, student.course)
+            )
+            return {"detail": "Student record created successfully"}
     except psycopg2.IntegrityError:
-        connection.rollback()
-        raise HTTPException(status_code=404, detail='Student ID already exists')
+        raise HTTPException(status_code=409, detail="Student ID already exists")
 
-# Update Student Record
+
+# 4. Update Student Record (Full)
 @app.put('/students/{id}')
 def update_student_record(id: int, student: Student):
-    cursor.execute('Update Students SET id=%s, name=%s, course=%s WHERE id=%s',(student.id, student.name, student.course,id))
-    if(cursor.rowcount == 0):
-        raise HTTPException(status_code=404, detail='Invalid Id')
-    connection.commit()
-    raise HTTPException(status_code=200, detail='Student Record Updated Successfully')
+    with connection.cursor() as cursor:
+        cursor.execute(
+            'UPDATE students SET id=%s, name=%s, course=%s WHERE id=%s',
+            (student.id, student.name, student.course, id)
+        )
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail='Invalid ID')
+        return {"detail": "Student record updated successfully"}
 
-# Partial update
+
+# 5. Partial Update
 @app.patch('/students/{id}')
 def partial_update(id: int, student: Student):
-    if(student.id != None):
-        cursor.execute('UPDATE students SET id=%s WHERE id=%s', (student.id, id))
-    if(student.name != None):
-        cursor.execute('UPDATE students SET name=%s WHERE id=%s', (student.name, id))
-    if(student.course != None):
-        cursor.execute('UPDATE students SET course=%s WHERE id=%s', (student.course, id))
-    if(cursor.rowcount == 0):
-        raise HTTPException(status_code=404, detail='Invalid ID')
-    connection.commit()
-    raise HTTPException(status_code=200, detail='Partial Update Successful')
+    updates = []
+    params = []
+    
+    if student.id is not None:
+        updates.append("id = %s")
+        params.append(student.id)
+    if student.name is not None:
+        updates.append("name = %s")
+        params.append(student.name)
+    if student.course is not None:
+        updates.append("course = %s")
+        params.append(student.course)
+        
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields provided to update")
 
-# Delete Record 
+    params.append(id)
+    query = f"UPDATE students SET {', '.join(updates)} WHERE id = %s"
+
+    with connection.cursor() as cursor:
+        cursor.execute(query, tuple(params))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail='Invalid ID')
+        return {"detail": "Partial update successful"}
+
+
+# 6. Delete Record
 @app.delete('/students/{id}')
 def delete_student_record(id: int):
-    cursor.execute('DELETE FROM students WHERE id=%s', (id,))
-    if (cursor.rowcount == 0):
-        raise HTTPException(status_code=404, detail='Invalid ID')
-    connection.commit()
-    raise HTTPException(status_code=200,detail='Student record deleted Successfully')
-    
+    with connection.cursor() as cursor:
+        cursor.execute('DELETE FROM students WHERE id=%s', (id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail='Invalid ID')
+        return {"detail": "Student record deleted successfully"}
